@@ -1,0 +1,506 @@
+# 注册 / 登录共用任务实现；由 ci.yml / login.yml 以 workflow_call 调用。
+name: ChatGPT task
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'register、login 或 bind_phone'
+        required: true
+        type: string
+      commit_message:
+        description: '用于 run-name 的提交主题（非敏感）'
+        required: true
+        type: string
+      accounts:
+        description: '账号列表'
+        required: true
+        type: string
+      forwarding_emails:
+        description: '转发收件箱（仅注册；单邮箱账号收验证邮件用）'
+        required: false
+        default: 'TimmothyBegan9059@hotmail.com'
+        type: string
+      enable_mfa:
+        description: '注册后开启 ChatGPT 两步验证'
+        required: false
+        default: true
+        type: boolean
+      enable_proxy:
+        description: '启用住宅代理（关闭则直连）'
+        required: false
+        default: false
+        type: boolean
+      proxy_region:
+        description: '代理地区码（JP/PH 等）'
+        required: false
+        default: ''
+        type: string
+      proxy_links:
+        description: '代理链接列表（每行一条；多账号按序号轮询）'
+        required: false
+        default: ''
+        type: string
+      hold_minutes:
+        description: '成功后保持分钟数'
+        required: false
+        default: '15'
+        type: string
+      payment_link_type:
+        description: '支付提链类型'
+        required: false
+        default: '未选择'
+        type: string
+      payment_card:
+        description: '支付提链卡密'
+        required: false
+        default: ''
+        type: string
+      gc_ph_api_key:
+        description: 'GC 菲律宾图片 API Key（有值时提链截屏后上传并轮询）'
+        required: false
+        default: ''
+        type: string
+      hero_sms_api_key:
+        description: 'Hero SMS API Key（bind_phone 模式必填）'
+        required: false
+        default: ''
+        type: string
+      hero_sms_service:
+        description: 'Hero SMS 服务码'
+        required: false
+        default: ''
+        type: string
+      hero_sms_country:
+        description: 'Hero SMS 国家 ID'
+        required: false
+        default: ''
+        type: string
+      web_task_id:
+        description: '网页控制台任务 ID'
+        required: false
+        default: ''
+        type: string
+      account_index_base:
+        description: '全局账号序号偏移（多 PAT 拆分时由控制台传入）'
+        required: false
+        default: '0'
+        type: string
+
+run-name: ${{ inputs.commit_message }}
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  TZ: Asia/Shanghai
+  TASK_MODE: ${{ inputs.mode }}
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      total: ${{ steps.matrix.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 通知网页进度（已接手）
+        if: ${{ inputs.web_task_id != '' }}
+        continue-on-error: true
+        env:
+          WEB_TASK_ID: ${{ inputs.web_task_id }}
+          WEB_CALLBACK_URL: ${{ secrets.WEB_CALLBACK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEB_EVENT: progress
+          WEB_MESSAGE: 任务已接手，正在分配处理…
+        run: python .github/scripts/web_callback.py
+
+      - id: matrix
+        name: 校验账号并生成矩阵
+        shell: python
+        env:
+          TASK_MODE: ${{ inputs.mode }}
+          ACCOUNTS: ${{ inputs.accounts }}
+          FORWARDING_EMAILS: ${{ inputs.forwarding_emails }}
+          FORWARD_MAILBOXES: ${{ secrets.FORWARD_MAILBOXES }}
+        run: |
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, '.github/scripts')
+          from account_input import (
+              apply_account_mail_env,
+              apply_login_account_env,
+              FIELD_SEPARATOR,
+              parse_accounts,
+              parse_email_list,
+              parse_login_accounts,
+              resolve_forward_mailbox,
+              split_account_records,
+          )
+
+          mode = (os.environ.get('TASK_MODE') or '').strip().lower()
+          try:
+              if mode in ('login', 'bind_phone'):
+                  accounts = parse_login_accounts(os.environ['ACCOUNTS'])
+                  raw_records = split_account_records(os.environ['ACCOUNTS'])
+                  needs_forward = any(
+                      acc.register_fields is not None and len(acc.register_fields) == 1
+                      for acc in accounts
+                  )
+                  forwarding = (
+                      parse_email_list(os.environ.get('FORWARDING_EMAILS', ''))
+                      if (os.environ.get('FORWARDING_EMAILS') or '').strip()
+                      else []
+                  )
+                  if needs_forward:
+                      if not forwarding:
+                          raise ValueError('存在单邮箱账号时必须配置 forwarding_emails')
+                      resolve_forward_mailbox(forwarding, os.environ.get('FORWARD_MAILBOXES', ''))
+                  elif forwarding:
+                      resolve_forward_mailbox(forwarding, os.environ.get('FORWARD_MAILBOXES', ''))
+              elif mode == 'register':
+                  accounts = parse_accounts(os.environ['ACCOUNTS'])
+                  if any(len(account) == 1 for account in accounts):
+                      forwarding = parse_email_list(os.environ.get('FORWARDING_EMAILS', ''))
+                      if not forwarding:
+                          raise ValueError('存在单邮箱账号时必须配置 forwarding_emails')
+                      resolve_forward_mailbox(forwarding, os.environ.get('FORWARD_MAILBOXES', ''))
+              else:
+                  raise ValueError(f'未知 mode: {mode}')
+          except ValueError as error:
+              raise SystemExit(str(error)) from None
+
+          items = [
+              {
+                  'account_index': index,
+                  'email': (
+                      account.email if hasattr(account, 'email') else account[0]
+                  ).strip().lower(),
+              }
+              for index, account in enumerate(accounts)
+          ]
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('matrix=' + json.dumps(items, separators=(',', ':')) + '\n')
+              output.write(f'total={len(accounts)}\n')
+
+      - name: 通知网页控制台已开始
+        if: ${{ inputs.web_task_id != '' }}
+        continue-on-error: true
+        env:
+          WEB_TASK_ID: ${{ inputs.web_task_id }}
+          WEB_CALLBACK_URL: ${{ secrets.WEB_CALLBACK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEB_EVENT: started
+          WEB_TOTAL: ${{ steps.matrix.outputs.total }}
+        run: python .github/scripts/web_callback.py
+
+  account:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    # 注册/绑定手机允许单账号失败后继续汇总；登录保持严格失败传播
+    continue-on-error: ${{ inputs.mode == 'register' || inputs.mode == 'bind_phone' }}
+    concurrency:
+      group: chatgpt-${{ inputs.mode }}-${{ matrix.email }}
+      cancel-in-progress: true
+    strategy:
+      max-parallel: 20
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取账号配置
+        shell: python
+        env:
+          TASK_MODE: ${{ inputs.mode }}
+          ACCOUNTS: ${{ inputs.accounts }}
+          ACCOUNT_INDEX: ${{ matrix.account_index }}
+          ACCOUNT_INDEX_BASE: ${{ inputs.account_index_base }}
+          FORWARDING_EMAILS: ${{ inputs.forwarding_emails }}
+          FORWARD_MAILBOXES: ${{ secrets.FORWARD_MAILBOXES }}
+        run: |
+          import os
+          import sys
+
+          sys.path.insert(0, '.github/scripts')
+          from account_input import (
+              apply_account_mail_env,
+              apply_login_account_env,
+              parse_accounts,
+              parse_email_list,
+              parse_login_accounts,
+              resolve_forward_mailbox,
+              split_account_records,
+          )
+
+          mode = (os.environ.get('TASK_MODE') or '').strip().lower()
+          index = int(os.environ['ACCOUNT_INDEX'])
+          base = int((os.environ.get('ACCOUNT_INDEX_BASE') or '0').strip() or '0')
+          global_index = base + index
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env_file:
+              env_file.write(f'WEB_ACCOUNT_INDEX={global_index}\n')
+              if mode in ('login', 'bind_phone'):
+                  raw_records = split_account_records(os.environ['ACCOUNTS'])
+                  record = parse_login_accounts(os.environ['ACCOUNTS'])[index]
+                  forwarding = (
+                      parse_email_list(os.environ.get('FORWARDING_EMAILS', ''))
+                      if (os.environ.get('FORWARDING_EMAILS') or '').strip()
+                      else []
+                  )
+                  if record.chatgpt_password:
+                      print(f'::add-mask::{record.chatgpt_password}')
+                  apply_login_account_env(
+                      env_file,
+                      raw_records[index],
+                      record,
+                      forwarding,
+                      os.environ.get('FORWARD_MAILBOXES', ''),
+                  )
+              else:
+                  raw_records = split_account_records(os.environ['ACCOUNTS'])
+                  fields = parse_accounts(os.environ['ACCOUNTS'])[index]
+                  forwarding = (
+                      parse_email_list(os.environ.get('FORWARDING_EMAILS', ''))
+                      if (os.environ.get('FORWARDING_EMAILS') or '').strip()
+                      else []
+                  )
+                  values = apply_account_mail_env(
+                      env_file,
+                      fields,
+                      forwarding,
+                      os.environ.get('FORWARD_MAILBOXES', ''),
+                  )
+                  env_file.write(f'ACCOUNT_EMAIL<<__EMAIL_VALUE__\n{values["EMAIL"]}\n__EMAIL_VALUE__\n')
+                  env_file.write(
+                      f'ACCOUNT_CONFIG_LINE<<__CONFIG_VALUE__\n{raw_records[index]}\n__CONFIG_VALUE__\n'
+                  )
+
+      - name: 通知网页进度（账号就绪）
+        if: ${{ inputs.web_task_id != '' }}
+        continue-on-error: true
+        env:
+          WEB_TASK_ID: ${{ inputs.web_task_id }}
+          WEB_CALLBACK_URL: ${{ secrets.WEB_CALLBACK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEB_EVENT: progress
+          WEB_MESSAGE: 已轮到此账号，正在就绪…
+          WEB_ACCOUNT_INDEX: ${{ env.WEB_ACCOUNT_INDEX || matrix.account_index }}
+          WEB_ACCOUNT_EMAIL: ${{ env.ACCOUNT_EMAIL || matrix.email }}
+        run: python .github/scripts/web_callback.py
+
+      - name: 运行
+        id: run
+        env:
+          ENABLE_CHATGPT_MFA: ${{ inputs.enable_mfa }}
+          ENABLE_PROXY: ${{ inputs.enable_proxy }}
+          HOLD_MINUTES: ${{ inputs.hold_minutes }}
+          PAYMENT_LINK_TYPE: ${{ inputs.payment_link_type }}
+          PAYMENT_CARD: ${{ inputs.payment_card }}
+          GC_PH_API_KEY: ${{ inputs.gc_ph_api_key }}
+          HERO_SMS_API_KEY: ${{ inputs.hero_sms_api_key }}
+          HERO_SMS_SERVICE: ${{ inputs.hero_sms_service }}
+          HERO_SMS_COUNTRY: ${{ inputs.hero_sms_country }}
+          WEB_TASK_ID: ${{ inputs.web_task_id }}
+          WEB_CALLBACK_URL: ${{ secrets.WEB_CALLBACK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          # 全局序号由「读取账号配置」写入 GITHUB_ENV；此处仅作缺省
+          WEB_ACCOUNT_INDEX: ${{ env.WEB_ACCOUNT_INDEX || matrix.account_index }}
+          WEB_ACCOUNT_EMAIL: ${{ env.ACCOUNT_EMAIL || matrix.email }}
+          CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
+          PROXY_LINKS: ${{ inputs.proxy_links }}
+          ACCOUNT_RESULT_PATH: step-summary
+          ACCOUNT_SESSION_JSON_PATH: session.json
+          ACCOUNT_COOKIE_DIR: cookies
+          # 与 Pages secret GITHUB_PAT 相同；runner 仓由 deploy_runner_repo.py 写入
+          BUNDLE_AUTH_TOKEN: ${{ secrets.BUNDLE_AUTH_TOKEN }}
+          # 使用 runner 预装 Chrome，无需 node_modules / Puppeteer 缓存
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
+        run: |
+          set -euo pipefail
+          if [ -z "${BUNDLE_AUTH_TOKEN}" ]; then
+            echo "缺少 Secret BUNDLE_AUTH_TOKEN（须与 Pages GITHUB_PAT 相同）"
+            exit 1
+          fi
+          echo "::add-mask::${BUNDLE_AUTH_TOKEN}"
+          if [ -z "${WEB_CALLBACK_URL}" ]; then
+            echo "缺少 Secret WEB_CALLBACK_URL"
+            exit 1
+          fi
+          # https://xxx.pages.dev/api/webhook → https://xxx.pages.dev/api/bundle
+          bundle_base="${WEB_CALLBACK_URL%/api/webhook}/api/bundle"
+          notify_progress() {
+            WEB_EVENT=progress WEB_MESSAGE="$1" python .github/scripts/web_callback.py || true
+          }
+          notify_progress '正在加载运行组件…'
+          mkdir -p dist
+          curl -fsSL -H "Authorization: Bearer ${BUNDLE_AUTH_TOKEN}" \
+            -o dist/app.js "${bundle_base}/app.js"
+          curl -fsSL -H "Authorization: Bearer ${BUNDLE_AUTH_TOKEN}" \
+            -o dist/login.js "${bundle_base}/login.js"
+          # 截图中文需要 CJK 字体；已安装则跳过 apt，避免空等
+          if dpkg -s fonts-noto-cjk >/dev/null 2>&1; then
+            notify_progress '运行环境已就绪'
+          else
+            notify_progress '正在安装中文字体…'
+            sudo apt-get install -y --no-install-recommends fonts-noto-cjk || true
+            notify_progress '运行环境已就绪'
+          fi
+          if [ ! -x "${PUPPETEER_EXECUTABLE_PATH}" ]; then
+            for candidate in /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium-browser /usr/bin/chromium; do
+              if [ -x "${candidate}" ]; then
+                export PUPPETEER_EXECUTABLE_PATH="${candidate}"
+                break
+              fi
+            done
+          fi
+          if [ ! -x "${PUPPETEER_EXECUTABLE_PATH}" ]; then
+            echo "未找到可用的 Chrome/Chromium：${PUPPETEER_EXECUTABLE_PATH}"
+            exit 1
+          fi
+          echo "浏览器：${PUPPETEER_EXECUTABLE_PATH}"
+          hold="${{ inputs.hold_minutes }}"
+          mode="${{ inputs.mode }}"
+          # 掩码客户端传入的代理链接/通道密钥，避免出现在日志
+          if [ -n "${GC_PH_API_KEY}" ]; then echo "::add-mask::${GC_PH_API_KEY}"; fi
+          if [ -n "${HERO_SMS_API_KEY}" ]; then echo "::add-mask::${HERO_SMS_API_KEY}"; fi
+          if [ -n "${PROXY_LINKS}" ]; then
+            printf '%s\n' "${PROXY_LINKS}" | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done
+          fi
+          # gcash 提链约 10 分钟；菲律宾通道轮询最多约 18 分钟，额外预留
+          extra=0
+          if [ "${{ inputs.payment_link_type }}" = "gcash" ]; then extra=10; fi
+          if [ -n "${GC_PH_API_KEY}" ] && [ "${{ inputs.payment_link_type }}" = "gcash" ]; then extra=$((extra + 20)); fi
+          if [ "$mode" = "bind_phone" ]; then extra=$((extra + 15)); fi
+          if [ ! -s dist/app.js ] || [ ! -s dist/login.js ]; then
+            echo "下载的预编译产物为空"
+            ls -la dist || true
+            exit 1
+          fi
+          notify_progress '开始处理账号…'
+          if [ "$mode" = "login" ] || [ "$mode" = "bind_phone" ]; then
+            timeout -k 30s "$(( (hold + 10 + extra) * 60 ))s" node dist/login.js
+          else
+            timeout -k 30s "$(( (hold + 15 + extra) * 60 ))s" node dist/app.js
+          fi
+
+      - name: 通知网页控制台账号失败
+        # cancelled 不是 failure：并发取消/手动取消也必须回传，否则网页会一直「处理中」
+        if: ${{ (failure() || cancelled()) && inputs.web_task_id != '' }}
+        continue-on-error: true
+        env:
+          WEB_TASK_ID: ${{ inputs.web_task_id }}
+          WEB_CALLBACK_URL: ${{ secrets.WEB_CALLBACK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEB_EVENT: account_done
+          WEB_ACCOUNT_INDEX: ${{ env.WEB_ACCOUNT_INDEX }}
+          WEB_ACCOUNT_EMAIL: ${{ env.ACCOUNT_EMAIL || matrix.email }}
+          WEB_ACCOUNT_OK: 'false'
+          WEB_ACCOUNT_ERROR_DEFAULT: ${{ inputs.mode == 'login' && '登录失败' || inputs.mode == 'bind_phone' && '绑定失败' || '注册失败' }}
+        run: |
+          if [ -f web-account-error.txt ]; then
+            WEB_ACCOUNT_ERROR="$(python -c "from pathlib import Path; t=Path('web-account-error.txt').read_text(encoding='utf-8').strip().splitlines(); print((t[0] if t else '')[:240])")"
+          fi
+          if [ -z "${WEB_ACCOUNT_ERROR}" ]; then
+            if [ "${{ job.status }}" = "cancelled" ]; then
+              WEB_ACCOUNT_ERROR="任务已取消"
+            else
+              WEB_ACCOUNT_ERROR="${WEB_ACCOUNT_ERROR_DEFAULT}"
+            fi
+          fi
+          export WEB_ACCOUNT_ERROR
+          python .github/scripts/web_callback.py
+
+      - name: 上传账号结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: account-${{ inputs.account_index_base }}-${{ matrix.account_index }}
+          path: |
+            step-summary
+            session.json
+            cookies/
+            access-token.txt
+            access-token.b64.txt
+            payment-link.txt
+            web-account-error.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 上传过程证据
+        if: always() && hashFiles('evidence/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ inputs.account_index_base }}-${{ matrix.account_index }}
+          path: evidence/
+          retention-days: 7
+
+  finalize:
+    needs: account
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载所有账号结果
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: account-*
+          path: summaries
+
+      - name: 合并结果并打包 session/cookie
+        env:
+          SUMMARIES_DIR: summaries
+          # 登录：无 token 不强制失败；注册：无成功结果则失败
+          REQUIRE_RESULTS: ${{ inputs.mode == 'register' && '1' || '0' }}
+        run: python .github/scripts/collect_payment_summary.py
+
+      - name: 上传汇总产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-summary
+          path: |
+            all-access-tokens.txt
+            web-summary.txt
+            sessions-and-cookies.zip
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 通知网页控制台任务结束
+        if: ${{ always() && inputs.web_task_id != '' }}
+        continue-on-error: true
+        env:
+          WEB_TASK_ID: ${{ inputs.web_task_id }}
+          WEB_CALLBACK_URL: ${{ secrets.WEB_CALLBACK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEB_EVENT: finished
+          WEB_FINISHED_OK: ${{ needs.account.result == 'success' && 'true' || 'false' }}
+          WEB_RUN_NAME: ${{ inputs.commit_message }}
+        run: python .github/scripts/web_callback.py
+
+      - name: 尝试删除本次 run（登录成功后清除日志中的 access token）
+        if: ${{ success() && inputs.mode == 'login' && needs.account.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          code=$(curl -sS -o /tmp/delete-run-body.txt -w '%{http_code}' -X DELETE \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          echo "delete_http_status=${code}"
+          if [ "${code}" = "204" ]; then
+            echo "已请求删除本次 workflow run"
+          else
+            echo "无法自动删除本次 run，请手动删除。响应："
+            cat /tmp/delete-run-body.txt || true
+          fi

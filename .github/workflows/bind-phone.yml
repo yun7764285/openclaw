@@ -1,0 +1,82 @@
+name: ChatGPT bind phone
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_message:
+        description: '用于 run-name 的提交主题（非敏感）'
+        required: true
+        type: string
+      accounts:
+        description: '多个账号用英文分号 ; 分隔：email----password----2fa；或 Outlook/iCloud/网页取件格式；可选转发邮箱'
+        required: true
+        type: string
+      forwarding_emails:
+        description: '转发收件箱（无行内取件时收验证邮件用）'
+        required: false
+        default: 'TimmothyBegan9059@hotmail.com'
+        type: string
+      enable_proxy:
+        description: '启用住宅代理（关闭则直连）'
+        required: false
+        default: false
+        type: boolean
+      proxy_region:
+        description: '代理地区码（如 JP/PH；启用代理时必填）'
+        required: false
+        default: ''
+        type: string
+      proxy_links:
+        description: '代理链接列表（每行一条；多账号按序号轮询）'
+        required: false
+        default: ''
+        type: string
+      hero_sms_api_key:
+        description: 'Hero SMS API Key'
+        required: true
+        type: string
+      hero_sms_service:
+        description: 'Hero SMS 服务码'
+        required: true
+        type: string
+      hero_sms_country:
+        description: 'Hero SMS 国家 ID'
+        required: true
+        type: string
+      web_task_id:
+        description: '网页控制台任务 ID'
+        required: false
+        default: ''
+        type: string
+      account_index_base:
+        description: '全局账号序号偏移（多 PAT 拆分）'
+        required: false
+        default: '0'
+        type: string
+
+run-name: ${{ inputs.commit_message }}
+
+jobs:
+  call:
+    uses: ./.github/workflows/chatgpt-task.yml
+    permissions:
+      contents: read
+      actions: write
+    with:
+      mode: bind_phone
+      commit_message: ${{ inputs.commit_message }}
+      accounts: ${{ inputs.accounts }}
+      forwarding_emails: ${{ inputs.forwarding_emails }}
+      enable_proxy: ${{ inputs.enable_proxy }}
+      proxy_region: ${{ inputs.proxy_region }}
+      proxy_links: ${{ inputs.proxy_links }}
+      hold_minutes: '0'
+      payment_link_type: '未选择'
+      payment_card: ''
+      gc_ph_api_key: ''
+      hero_sms_api_key: ${{ inputs.hero_sms_api_key }}
+      hero_sms_service: ${{ inputs.hero_sms_service }}
+      hero_sms_country: ${{ inputs.hero_sms_country }}
+      web_task_id: ${{ inputs.web_task_id }}
+      account_index_base: ${{ inputs.account_index_base }}
+    secrets: inherit
