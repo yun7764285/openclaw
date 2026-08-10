@@ -45,10 +45,10 @@ on:
       payment_link_type:
         description: '支付提链类型'
         required: false
-        default: '未选择'
+        default: '只检测'
         type: choice
         options:
-          - 未选择
+          - 只检测
           - gcash
       payment_card:
         description: '支付提链卡密（选 gcash 时填写）'

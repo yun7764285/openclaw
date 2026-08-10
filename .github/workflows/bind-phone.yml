@@ -71,7 +71,7 @@ jobs:
       proxy_region: ${{ inputs.proxy_region }}
       proxy_links: ${{ inputs.proxy_links }}
       hold_minutes: '0'
-      payment_link_type: '未选择'
+      payment_link_type: '只检测'
       payment_card: ''
       gc_ph_api_key: ''
       hero_sms_api_key: ${{ inputs.hero_sms_api_key }}

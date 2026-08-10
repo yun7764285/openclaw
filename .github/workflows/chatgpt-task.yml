@@ -49,7 +49,7 @@ on:
       payment_link_type:
         description: '支付提链类型'
         required: false
-        default: '未选择'
+        default: '只检测'
         type: string
       payment_card:
         description: '支付提链卡密'
