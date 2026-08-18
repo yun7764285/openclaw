@@ -75,5 +75,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          config.cmd --unattended --ephemeral --replace --url "${{ inputs.target_url }}" --token "${{ inputs.reg_token }}" --name "${{ inputs.runner_name }}" --labels "${{ inputs.runner_labels }}"
-          run.cmd
+          call config.cmd --unattended --ephemeral --replace --url "${{ inputs.target_url }}" --token "${{ inputs.reg_token }}" --name "${{ inputs.runner_name }}" --labels "${{ inputs.runner_labels }}"
+          if errorlevel 1 exit /b 1
+          call run.cmd
