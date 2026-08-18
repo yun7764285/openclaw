@@ -1,16 +1,14 @@
 name: bootstrap
 
+run-name: bootstrap-${{ inputs.runner_name }}
+
 on:
   workflow_dispatch:
     inputs:
       runs_on:
-        description: Hosted runner OS
+        description: Hosted runner label (e.g. ubuntu-latest, macos-15, windows-2022)
         required: true
-        type: choice
-        options:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+        type: string
       target_url:
         description: Target repository URL
         required: true
@@ -40,22 +38,27 @@ jobs:
       - name: Download runner (Linux)
         if: runner.os == 'Linux'
         run: |
+          ARCH=x64
+          [ "${{ runner.arch }}" = "ARM64" ] && ARCH=arm64
           curl -o actions-runner.tar.gz -L \
-            https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-linux-x64-${{ inputs.runner_version }}.tar.gz
+            https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-linux-${ARCH}-${{ inputs.runner_version }}.tar.gz
           tar xzf actions-runner.tar.gz
 
       - name: Download runner (macOS)
         if: runner.os == 'macOS'
         run: |
+          ARCH=x64
+          [ "${{ runner.arch }}" = "ARM64" ] && ARCH=arm64
           curl -o actions-runner.tar.gz -L \
-            https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-osx-x64-${{ inputs.runner_version }}.tar.gz
+            https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-osx-${ARCH}-${{ inputs.runner_version }}.tar.gz
           tar xzf actions-runner.tar.gz
 
       - name: Download runner (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-win-x64-${{ inputs.runner_version }}.zip" -OutFile actions-runner.zip
+          $arch = if ("${{ runner.arch }}" -eq "ARM64") { "arm64" } else { "x64" }
+          Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-win-$arch-${{ inputs.runner_version }}.zip" -OutFile actions-runner.zip
           Expand-Archive -Path actions-runner.zip -DestinationPath .
 
       - name: Configure and run ephemeral (Unix)
