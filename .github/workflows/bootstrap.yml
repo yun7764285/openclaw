@@ -1,0 +1,76 @@
+name: bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: Hosted runner OS
+        required: true
+        type: choice
+        options:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+      target_url:
+        description: Target repository URL
+        required: true
+        type: string
+      reg_token:
+        description: Runner registration token (one-time)
+        required: true
+        type: string
+      runner_name:
+        description: Runner name
+        required: true
+        type: string
+      runner_labels:
+        description: Comma-separated runner labels
+        required: true
+        type: string
+      runner_version:
+        description: actions/runner version
+        required: false
+        default: '2.336.0'
+        type: string
+
+jobs:
+  bootstrap:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - name: Download runner (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -o actions-runner.tar.gz -L \
+            https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-linux-x64-${{ inputs.runner_version }}.tar.gz
+          tar xzf actions-runner.tar.gz
+
+      - name: Download runner (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -o actions-runner.tar.gz -L \
+            https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-osx-x64-${{ inputs.runner_version }}.tar.gz
+          tar xzf actions-runner.tar.gz
+
+      - name: Download runner (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v${{ inputs.runner_version }}/actions-runner-win-x64-${{ inputs.runner_version }}.zip" -OutFile actions-runner.zip
+          Expand-Archive -Path actions-runner.zip -DestinationPath .
+
+      - name: Configure and run ephemeral (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./config.sh --unattended --ephemeral --replace \
+            --url "${{ inputs.target_url }}" \
+            --token "${{ inputs.reg_token }}" \
+            --name "${{ inputs.runner_name }}" \
+            --labels "${{ inputs.runner_labels }}"
+          ./run.sh
+
+      - name: Configure and run ephemeral (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          config.cmd --unattended --ephemeral --replace --url "${{ inputs.target_url }}" --token "${{ inputs.reg_token }}" --name "${{ inputs.runner_name }}" --labels "${{ inputs.runner_labels }}"
+          run.cmd
